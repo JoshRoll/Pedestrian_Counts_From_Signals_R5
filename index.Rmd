@@ -1,0 +1,693 @@
+---
+title: "Pedestrian Traffic<br> Estimation for Liquidation<br> Costs" 
+author: |
+  | Author: Josh Roll
+  | Unit: [ODOT Research Unit](https://www.oregon.gov/odot/programs/pages/research.aspx)
+  | Email: [josh.f.roll@odot.oregon.gov](josh.f.roll@odot.oregon.gov)
+  | Github Handle: [JoshRoll](https://github.com/JoshRoll)
+output:
+  bookdown::html_document2:
+      fig_caption: TRUE
+      toc: true
+      toc_depth: 3
+      toc_float: true
+      number_sections: true
+knit: (function(inputFile, encoding) { 
+      out_dir <- '../Reports/';
+      rmarkdown::render(inputFile,
+                        encoding=encoding, 
+                        output_file=file.path(dirname(inputFile), out_dir, "Pedestrian_Estimation_Methods_For_Liquidation_Costs.html")) })
+bibliography: references/references.bib
+link-citations: true
+bibliographystyle: apalike
+---
+
+```{r, echo=FALSE}
+
+htmltools::img(src = knitr::image_uri("Z:/JRoll/Statewide Requests/Liquidation Costs for Pedestrians/Reports/Graphics/ODOT_Logo.png"), 
+               alt = 'logo', 
+               style = 'position:absolute; top:0; right:0; padding:10px;')
+```
+
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(
+  #echo = FALSE,
+  collapse = TRUE,
+  comment = "#>",
+  root.dir = "Z:/JRoll/Statewide Requests/Liquidation Costs for Pedestrians/"
+)
+```
+# Introduction
+
+In early 2022 staff from Oregon Department of Transportation's Region 5 were interested in estimating the delay and safety related costs to pedestrians incurred when corners and intersections are closed while wheelchair ramps (ADA ramps) are being reconstructed.  The objective of quantifying these costs aims to ensure construction contractors are conssidering these costs explicitly when determining project demolition and construction phasing.  In order to accurately assess these costs a reliable estimate of pedestrian traffic volume is required.  Estimates of pedestrian traffic informs economic valuation of delay and safety so that those costs are considered by  contractors for ADA ramp projects and sidewalk closures are minimized in duration and impact to the community.
+
+This report documents the data and methods used to estimate pedestrian traffic at 54 intersections in Region 5 where ADA ramp projects are planned in 2023.  The reports uses observed traffic counts and push button actuations from [ODOT traffic signals](https://app.powerbigov.us/view?r=eyJrIjoiYTA4ZDk2OTAtYjgzYi00OTEwLTlkYTMtOWM5MjQ3OTFiYjRiIiwidCI6IjI4YjBkMDEzLTQ2YmMtNGE2NC04ZDg2LTFjOGEzMWNmNTkwZCJ9&pageName=ReportSection115e1d32a5be73a920be) as well as some of the latest pedestrian traffic estimation techniques from recent and [ongoing research](https://www.oregon.gov/odot/Programs/ResearchDocuments/spr857wp.pdf).  The data, methods, and results are summarised below in this report.
+```{r, echo = F,include = FALSE ,warning=FALSE}
+  #  defaultW <- getOption("warn") 
+   # options(warn = -1) 
+  #options(warn = defaultW)
+	.libPaths("C:/Program Files/R/R-4.1.0/library")
+	#library(xfun)
+  library(bookdown)
+  library(ggplot2)
+  library(ggforce)
+	library(readxl)
+	library(RODBC) #For making OBDC connections
+	library(tidyverse)	#For data wrangling
+	library(ggplot2)
+	library(tigris) #for importing census county data
+	library(lubridate) #for creating temporal information 
+	library(leaflet)
+	library(htmlwidgets)
+	library(sf)
+	library(openxlsx)
+	library(sjPlot)
+	library(MASS)
+	library(Metrics)
+	library(kableExtra)
+  library(RColorBrewer)
+  library(plotly)
+  library(DT)
+  library(tigris)
+  library(leaflegend)
+  #Set environmental options
+  knitr::opts_knit$set(message=FALSE)
+  options(scipen=999) # No scientific notation
+  #setwd("//s7000b/6450only/JRoll/Statewide Requests/Liquidation Costs for Pedestrians")
+```
+
+```{r, echo = F,warning=FALSE,message=FALSE, include = FALSE}
+  #Prepare functions,environmental conditions and data for report
+  #----------------------------------------------------------------------------
+  #Define Custom R Functions
+  #Function that simplifies loading .RData objects
+  assignLoad <- function(filename){
+		load(filename)
+		get(ls()[ls() != "filename"])
+  }	
+  #Define Script parameters
+	#Load standard crs
+	Crs <-  assignLoad(file = "//wpdotfill09/R_VMP3_USERS/tdb069/Data/OSM/Projection/Projection_File.Rdata")
+	#Days of week vector
+	Weekdays. <- c("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
+	#Create a vector of possible hours
+	Hours. <- str_pad(0:23, 2, pad = "0")
+	
+	#Place Types - from https://www.oregon.gov/lcd/CL/Pages/Place-Types.aspx
+	###########################
+	#Set Directory
+	Dir <- "//wpdotfill09/R_VMP3_USERS/tdb069/Data/Land Use/PlaceTypes/"
+	#Set up temp directories for unzipping
+	temp <- tempfile()
+	temp2 <- tempfile()
+	# Unzip the contents of the temp and save unzipped content in 'temp2'
+	unzip(zipfile = paste0(Dir,"PlaceTypes.zip"), exdir = temp2)
+	# Read the shapefile. Alternatively make an assignment, such as f<-sf::read_sf(your_SHP_file)
+	Place_Types_Sf <- read_sf(temp2)
+	
+	
+  #Load Traffic counts and supporting data
+  #-------------------------------
+	#Intersections spatial data
+	Load_TMC_Intersection.. <- read_excel("//wpdotfill09/R_VMP3_USERS/tdb069/Data/Counts/Motorized/OTMS/Supporting Data/TMC_Intersection.xlsx")
+	#Convert into spatial data
+	Int_Sf <- Load_TMC_Intersection.. %>% filter(!is.na(Latitude) | Latitude >0)  %>% st_as_sf(coords = c("Longitude","Latitude")) %>% st_set_crs(Crs) %>% mutate(Intersection_Id = `Intersection ID`)
+	#Fix community for intersection 110034
+	Int_Sf$Community[Int_Sf$Intersection_Id == "110034"] <- "Ontario"
+	
+	#Load counts
+	Load_Counts..  <- assignLoad(file = "Z:/JRoll/Statewide Requests/Liquidation Costs for Pedestrians/Data/Processed/Short_Duration_Ped_Counts_Prepared.RData")
+	
+	#Load hourly data processed 
+	Hourly_Model_Data.. <- assignLoad( file = "Z:/JRoll/Statewide Requests/Liquidation Costs for Pedestrians/Data/Processed/Hourly_Data_for_Modeling_45.RData")
+	
+	
+	
+	#Summarize counts
+	#--------------------------------------------------------
+	#Make a copy
+	Counts.. <- Load_Counts..
+	#Its know the counts were only taken between 6 and 10 PM
+	Counts..$Hour <- do.call("rbind", strsplit(Counts..$Time, split = ":"))[,1] 
+	#Its know the counts were only taken between 6 and 10 PM
+	Counts.. <- Counts.. %>% filter(Hour%in%str_pad(6:21, 2, pad = "0"))
+	#add total column
+	Counts.. <- Counts.. %>% mutate(Total = North + South + West + East + Northeast + Southeast + Northwest + Southwest)
+	#Sum counts by leg and total 
+	Summary_1.. <- Counts.. %>% group_by(Intersection_Id) %>% summarise(North = sum(North,na.rm=T), South = sum(South,na.rm=T), West = sum(West,na.rm=T), East = sum(East,na.rm=T),
+		Northeast = sum(Northeast, na.rm=T), Southeast = sum(Southeast,na.rm=T), Northwest = sum(Northwest,na.rm=T), Southwest = sum(Southwest, na.rm= T),
+		Total = North + South + West + East + Northeast + Southeast + Northwest + Southwest,
+		Hours_Count = length(unique(paste0(Date,Hour)))) %>% 
+		#Per hour count 
+		mutate(Per_Hour_Total = Total / Hours_Count)
+	#Hourly Summary
+	Hourly.. <- Counts.. %>% group_by(Intersection_Id, Hour, Date) %>% summarise(North = sum(North,na.rm=T), South = sum(South,na.rm=T), West = sum(West,na.rm=T), East = sum(East,na.rm=T),
+			Northeast =  sum(Northeast, na.rm=T), Southeast = sum(Southeast, na.rm=T),  Northwest = sum(Northwest, na.rm=T), Southwest = sum(Southwest, na.rm=T), 
+		Total = North + South + West + East + Northeast + Southeast + Northwest + Southwest,
+		Hours_Count = length(unique(paste0(Date,Hour)))) 
+	#Daily Summary
+	Daily.. <- Counts.. %>% group_by(Intersection_Id, Date) %>% summarise(North = sum(North,na.rm=T), South = sum(South,na.rm=T), West = sum(West,na.rm=T), East = sum(East,na.rm=T),
+			Northeast =  sum(Northeast, na.rm=T), Southeast = sum(Southeast, na.rm=T),  Northwest = sum(Northwest, na.rm=T), Southwest = sum(Southwest, na.rm=T), 
+		Total = North + South + West + East + Northeast + Southeast + Northwest + Southwest,
+		Hours_Count = length(unique(paste0(Date,Hour)))) %>% 
+		mutate(Per_Hour_Count = Total / Hours_Count)
+	
+	#Join counts and Select intersections with count data
+	Select_Int_Sf <- left_join(Int_Sf, Summary_1.., by = "Intersection_Id") %>% filter(!is.na(Total))
+	#Spatial join of placetypes
+	Select_Int_Sf <- st_join(Select_Int_Sf, Place_Types_Sf)
+	
+	
+	#Prepare and summarized signals
+	#-------------------
+	####################################
+	#Load device location
+	Load_LatLong.. <- read_excel("//wpdotfill09/R_VMP3_USERS/tdb069/Data/Counts/Non Motorized/ODOT/Signals/Data/Supporting Data/dim_Devices.xlsx")
+	#Create spatialpoints object
+	Signals_Sf <- Load_LatLong.. %>% filter(!is.na(Latitude) | Latitude >0)  %>% st_as_sf(coords = c("Longitude","Latitude")) %>% st_set_crs(Crs)
+	#Mutate some column names
+	Signals_Sf <- Signals_Sf %>% mutate(DeviceId = DeviceID) %>%  rownames_to_column( var = "col.id")
+	#Spatial join of placetypes
+	Signals_Sf <- st_join(Signals_Sf, Place_Types_Sf)
+	
+	#Signals Push button data
+	########################
+	#Load Processed signals data
+	Load_Push_Button.. <- assignLoad(file = "//wpdotfill09/R_VMP3_USERS/tdb069/Data/Counts/Non Motorized/ODOT/Signals/Data/Processed/Processed_Signal_Data_Ped_Liquidation_Study_v2.RData")
+	#Summarise data
+	
+	#Hourly---
+	Hourly_Sig.. <- Load_Push_Button.. %>% filter(Type =="Reduced") %>% group_by(DeviceId, EventId, Date,Hour) %>% summarise(Count = sum(Count), Hour_Record_Count = length(unique(Hour))) %>% mutate(Year = year(Date), Month =             months(Date))
+	#Assign days of week
+	Hourly_Sig..$Date = as.Date(Hourly_Sig..$Date)  
+	Hourly_Sig.. <- Hourly_Sig.. %>% mutate(Weekday = weekdays(Date)) 
+	Hourly_Sig.. <- 	Hourly_Sig.. %>% mutate(Is_Weekday = case_when(
+		Weekday%in%c("Saturday","Sunday") ~ "Weekend",
+		!Weekday%in%c("Saturday","Sunday") ~ "Weekday"))
+	#Annual----
+	Annual.. <-	Hourly_Sig..%>% group_by(Year, DeviceId, EventId) %>% summarise(Count = sum(Count), Daily_Record_Count = length(Date))
+	#Join ped actuations 	
+	Signals_Sf <- left_join(Signals_Sf %>% mutate(DeviceId = as.numeric(DeviceID)), filter(Annual.., Year =="2022" & EventId ==45)  , by = "DeviceId")
+	
+	#Find signals nearest study intersections
+	#######################################
+	#Measure distance between signals and count locations
+	Distance.. <- st_distance(Select_Int_Sf, Signals_Sf)
+	rownames(Distance..) <- Select_Int_Sf$Intersection_Id
+	colnames(Distance..) <- Signals_Sf$DeviceId
+	#Create df of distance matrix with 100 m
+	Select_Distance.. <- data.frame(
+							Distance_Meter = as.numeric(unlist(apply(Distance.. , 1, function(x){x[x<=1000]}))), 
+							DeviceId = as.character(unlist(apply(Distance.. , 1, function(x){names(x)[x<=1000]}))),
+							Intersection_Id = do.call("rbind",str_split(names(unlist(apply(Distance.. , 1, function(x){x[x<=1000]}))), "\\."))[,1]
+						)
+	
+  #Do data description of signals data with a break out of signal used in models and signals used in application
+	##########################################################
+	#Create asummary of the signals data based on time periods based on when SDCs were collections
+	#Make copies of hourly and daily data frames and make selections
+	#Daily---
+	Model_Daily_Sig.. <-	Hourly_Model_Data.. %>% filter(Distance_Meter <=20) %>% group_by(DeviceId, Date) %>%summarise(Signal_Count = sum(Signal_Count), Hour_Record_Count = length(unique(Hour))) %>%
+		mutate(Year = year(Date), Month = months(Date)) 
+	#make a copy
+	Select_Hourly_Model_Data.. <- 	Hourly_Model_Data.. %>% filter(Distance_Meter <=20 & Hour%in%Hours.[7:22])	
+	#Hourly---
+	Model_Sig_Summary..  <- rbind(data.frame(Measure = c("Minimum","1st Quantile","Median","Mean","3rd Quantile","Max"),
+		Hourly = round(as.numeric(summary( Select_Hourly_Model_Data.. $Signal_Count)),1),
+		Daily = round(as.numeric(summary(	Model_Daily_Sig..$Signal_Count)),1)),
+		data.frame(Measure = "Observations", Hourly = nrow(Hourly_Model_Data..  ), Daily = nrow(Model_Daily_Sig..)),
+		data.frame(Measure = "Signal Count", Hourly = length(unique(Select_Hourly_Model_Data.. $DeviceId)), Daily = length(unique(Select_Hourly_Model_Data.. $DeviceId))))
+	#
+	#Create sumamry table for application signals data
+	#Hourly---
+	Select_Hourly_Sig.. <- Hourly_Sig..[Hourly_Sig..$DeviceId%in%c(Select_Distance.. %>% filter(Distance_Meter <1000) %>% pull(DeviceId)) & Hourly_Sig..$EventId ==45 & Hourly_Sig..$Year ==2022,]
+	#Daily----
+	Daily_Sig.. <- Load_Push_Button.. %>% filter(Type =="Reduced" )  %>% group_by(DeviceId, EventId, Date) %>% summarise(Count = sum(Count), Hour_Record_Count = length(unique(Hour))) %>%
+		mutate(Year = year(Date), Month = months(Date)) 
+	
+	Select_Daily_Sig.. <- Daily_Sig..[Daily_Sig..$DeviceId%in%c(Select_Distance.. %>% filter(Distance_Meter <1000) %>% pull(DeviceId)) & Daily_Sig..$EventId ==45 &  Daily_Sig..$Year =="2022",]
+	Sig_Summary.. <- rbind(data.frame(Measure = c("Minimum","1st Quantile","Median","Mean","3rd Quantile","Max"),
+		Hourly = round(as.numeric(summary(Select_Hourly_Sig..$Count)),1),
+		Daily = round(as.numeric(summary(Select_Daily_Sig..$Count)),1)),
+		data.frame(Measure = "Observations", Hourly = nrow(Select_Hourly_Sig..), Daily = nrow(Select_Daily_Sig..)),
+		data.frame(Measure = "Signal Count", Hourly = length(unique(Select_Hourly_Sig..$DeviceId)), Daily = length(unique(Select_Hourly_Sig..$DeviceId))))
+	
+
+	
+	#Perform cluster analyis
+	###############
+  #Model the hourly counts in order to adjust signals data to fully represent counts
+  #-------------------------------------------------------
+  	#Develop data for clustering analysis
+  #----------------------------------------------------------
+  	#prepare data
+  	##################
+  	Cluster_Data.. <- Hourly_Sig..  %>%  filter( EventId ==45 & Year =="2022") %>%
+  		#Add week 
+  		mutate(Week = week(Date))
+  	#Calculate daily rate of weekly aggregation
+  	Cluster_Data.. <- Cluster_Data.. %>% left_join(., Cluster_Data.. %>% 	group_by(DeviceId, Week) %>% summarise(Weekly_Count = sum(Count,na.rm = T), Days = length(unique(Date))), by = c("DeviceId","Week")) %>% 
+  		#Calculate ratio
+  		mutate(Prop = Count / Weekly_Count, Weekday = weekdays(Date))
+  	#Summarize 
+  	Cluster_Summary.. <- Cluster_Data.. %>% group_by(DeviceId, Weekday, Hour) %>% summarise(Prop = mean(Prop,na.rm=T)) %>% 
+  		#Order weekdays
+  		mutate(Weekday = factor(Weekday, levels = Weekdays.))
+  		
+  	#Perform cluster analysis 
+  	##########################
+  	#Prepare data
+  	Cluster_Input.. <- as.data.frame(Cluster_Summary.. %>%
+  			pivot_wider(names_from=c("Weekday","Hour"), values_from="Prop")) 
+  	#Set seed
+  	set.seed(10)		
+  	Cluster_Input..[is.na(Cluster_Input..)] <- 0
+  	Cluster_Results_ <- kmeans(Cluster_Input..,8)
+  	#Append clusters to input data
+  	Cluster_Input..$Cluster <- Cluster_Results_$cluster
+  	#Append the clusters to data for charting
+  	Cluster_Summary.. <- left_join(Cluster_Summary.., Cluster_Input..[,c("DeviceId","Cluster")], by = "DeviceId")
+  	#Check % of counters count per cluster
+  	#round(table(Cluster_Summary..$Cluster) / sum(table(Cluster_Summary..$Cluster)),2)
+  	#Apply clusters to hourly counts data to test impact oin model
+  	Model_Data.. <- left_join(Hourly_Model_Data.. %>% mutate(DeviceId = as.numeric(DeviceId)), Cluster_Input..[,c("DeviceId","Cluster")], by = "DeviceId")
+  	#Only use 16 SDCs where colelcted on at signals
+  	Model_Data.. <- Model_Data.. %>% filter(Distance_Meter <20)
+  	
+  	
+	
+	#Load models estimated previously
+	#########
+	Models_ <- assignLoad(file = "Z:/JRoll/Statewide Requests/Liquidation Costs for Pedestrians/Hourly_Ped_Count_Adj_Models.RData")
+	
+	#Create model performance summaries for char
+	#Store R2 results
+		RSq..  <- data.frame()
+	  for(i in 1:length(Models_)){
+	  	Model_Name = names(Models_)[i]
+	    RSq.. <- rbind(RSq.., 
+					data.frame(
+						Model = unlist(strsplit(Model_Name," - "))[2],
+						Adj_R2 = c(summary(Models_[[i]])$adj.r.squared),
+						Cluster = unlist(strsplit(Model_Name," - "))[1])
+				)
+	  }
+	
+		#Load data where applis estimated were created
+		Master_Apply_Data.. <- assignLoad(file = "Z:/JRoll/Statewide Requests/Liquidation Costs for Pedestrians/Applied_Model_Data.RData")
+		Master_Apply_Data_All.. <- assignLoad(file = "Z:/JRoll/Statewide Requests/Liquidation Costs for Pedestrians/Applied_Model_Data_All.RData")
+		
+		#Create diagnostic summary
+		#Accuracy
+  	Diagnostic_Summary.. <-  left_join(
+			left_join(Master_Apply_Data.. %>% group_by(Cluster, Model) %>% summarise(MAE = mae(Traffic_Count, Count_Est)) %>% mutate(DeviceId = Cluster),
+		#Add observed counts ADT and unadjusted push button AADT
+			rbind(Model_Data.. %>% group_by(DeviceId, Date) %>% summarise(ADT = sum(Traffic_Count), Daily_Count = sum(Signal_Count)) %>% 
+			group_by(DeviceId) %>% summarise(ADT = mean(ADT), Signal_AADT = mean(Daily_Count)),
+			cbind(DeviceId = "All", Model_Data.. %>% group_by(DeviceId, Date) %>% summarise(ADT = sum(Traffic_Count), Daily_Count = sum(Signal_Count)) %>% 
+			group_by() %>% summarise(ADT = mean(ADT), Signal_AADT = mean(Daily_Count)))) %>%mutate(DeviceId = as.character(DeviceId)),	by = "DeviceId"),
+		#Add AADT estimate from model
+		Master_Apply_Data_All.. %>% mutate(DeviceId = as.character(DeviceId)) %>% group_by(Cluster, Model, DeviceId) %>% summarise(Total_Est = sum( Count_Est), AADPT =  sum( Count_Est) / length(unique(Date)),
+			Push_Button = sum(Count), Push_to_Count_Ratio = sum(Count) / sum(Count_Est)), by = c("DeviceId","Cluster")) %>%
+		mutate(Model = Model.x) %>% dplyr::select(-c(Model.x, Model.y))
+		
+	  #Load up the final count esti
+  		Count_Est.. <- read.csv(file = "Z:/JRoll/Statewide Requests/Liquidation Costs for Pedestrians/Data/Results/AADPT_v4.csv")
+
+	
+		
+```
+# Data 
+This project uses observed short duraction traffic counts, pedestrian crosswalk push button actuations from ODOT traffic signals, and land use information from the Department of Land Conservation and Development (DLCD) Place Type framework.  These data are explained in more detail below.
+
+## Observed Traffic Counts 
+This section summarizes the short-duration pedestrian traffic counts (SDC) collected at 54 locations throughout spring of 2022 using video and later reduced to tabular data and entered into the [Oregon Traffic Monitoring System](https://ordot.public.ms2soft.com/tcds/tsearch.asp?loc=Ordot&mod=TCDS).  These SDCs were collected for 16 hours with 47 locations having 32 hours of data collected across two separate days resulting in 1,116 hours of data.  The hourly and daily pedestrian traffic volumes are summarized in the table below.
+
+```{r fig, echo = F,warning=FALSE}
+    
+    #Make data descriptices 
+    Counts_Summary.. <- rbind(data.frame(Measure = c("Minimum","1st Quantile","Median","Mean","3rd Quantile","Max"),
+      Hourly = round(as.numeric(summary(Hourly..$Total)),2),
+      Daily = round(as.numeric(summary(Daily..$Total)),2)),
+      data.frame(Measure = "N", Hourly = nrow(Hourly..), Daily = nrow(Daily..)))
+
+    #Print results of counts sumamry
+    Counts_Summary.. %>%
+  	  kbl(caption = "Observed Pedestrian Traffic Counts Data Summary") %>%
+			kable_classic(full_width = F, html_font = "Cambria",bootstrap_options = c("hover","striped"), position = "center") %>%
+      kable_styling(font_size = 14)
+	
+
+```
+
+## Push Button Actuations from Traffic Signals
+This section summarizes the push button actuations from ODOT traffic signals in the study area.  These push button data are created any time a person pushes the crosswalk button at an intersection with the Advanced Traffic Controllers (ATCs).  The ATC records each phase of the traffic signal in a [centralized data repository](https://app.powerbigov.us/view?r=eyJrIjoiYTA4ZDk2OTAtYjgzYi00OTEwLTlkYTMtOWM5MjQ3OTFiYjRiIiwidCI6IjI4YjBkMDEzLTQ2YmMtNGE2NC04ZDg2LTFjOGEzMWNmNTkwZCJ9&pageName=ReportSection115e1d32a5be73a920be) making them accessible for purposes of travel monitoring.  There are 35 intersections with ATC signal hardware within 1,000 meters of the 54 study intersections.  These push buttons actuation data will be used, once adjusted, as permanent pedestrian traffic counters. This adjustment will occur by combining counts and push button data and creating adjustment factors.  This process is explained in more detail in the following sections.  Throughout this document, the 35 signals are referred to as both 'signals' and 'devices' using such terminology as 'device id'.  The table below summarizes the push button actuations used in the development of the hourly adjustment models (Model Data) as well as the application of the model to create permanent count sites (Application Data). 
+
+
+
+
+```{r fig0, echo = F,warning=FALSE}
+  #Print table
+	cbind(Model_Sig_Summary..,Sig_Summary..[-1]) %>%
+		kbl(caption = "Select Signals' Push Button Data Summary") %>%
+		kable_classic(full_width = F, html_font = "Cambria",bootstrap_options = c("hover","striped"), position = "left") %>%
+		  #kable_material(c("striped", "hover", "condensed")) %>%
+		    kable_styling(bootstrap_options = c("hover","striped"), full_width = F, position = "center") %>%
+			  add_header_above(c(" ", "Model\nData" = 2, "Application\nData" = 2))
+
+
+```
+
+## Land Use - Place Type
+Land use classifications are used in this report to match permanent count sites to SDCs.  Land use information used below to define location types comes from the [Department of Land Conservation and Development's Place Types database.](https://www.oregon.gov/lcd/CL/Pages/Place-Types.aspx)  Place type classification uses built environment and transportation service availability data to describe the destination accessibility, design, and diversity measures to help provide an understanding of the interaction of land use and transportation choices for a given area.  The base data for Place Types comes from the [Environmental Protection Agency's Smart Location Database (SLD)](https://www.epa.gov/smartgrowth/smart-location-mapping#SLD) with those data elements used to inform a area type and a development type that are then [combined to form the Place Type classification.](https://www.oregon.gov/ODOT/Planning/Documents/Oregon-Place-Types-Classification.pdf)  Place type designations include 9 classifications including [Rural, Isolated City, Rural Near Major City, City Near Major Center, and MPO (low/residential/employment/Mixed use/ TOD)](https://www.oregon.gov/lcd/CL/Pages/Place-Types.aspx) and are available at the Census block level.  
+
+# Methods
+This section describes the development of hourly adjustment factors, the cluster analysis used to group signal controllers and the day-of-year traffic expansion factor methods. All data wrangling and analysis is performed in the [R open source statiscial computing platform.](https://www.R-project.org/)
+
+## Development and Application of Hourly Adjustment Models
+This project utilizes recent research from a Utah Department of Transportation (UDOT) funded research project lead by Patrick Singelton. @singleton_pedestrian_2021 combined over 10,000 hours of push button actuations and observed pedestrian traffic counts to create hourly adjustment factors.  These factors are created by estimating a simple model that relates the observed traffic counts to the push button actuations.  Using these simple models to adjust the hourly push button actuation data, push buttons can be used to estimate hourly counts with a small amount of error, around 3 +/- pedestrians per hour (Singleton & Runa 2020).  This project tested a few model forms but ultimatley concluded that the quadratic form was best.This section describes the model development using data collected at the study intersections.
+
+Generally speaking the hourly adjustment models rely on the assumption that the push buttons recorded by the ATCs at intersections relate to the pedestrian traffic observed using the intersection.  Adjustment factors are necessary because pedestrians do not always push the button to activate the crosswalk or they may be traveling in groups which means the one push of the button represents more than one actual pedestrian.  The chart below compares the hourly counts and hourly push button actuations at a select intersection used in this study.  
+
+```{r, echo = F, include = F}
+
+	#Show relationship between signal and count for presentation
+	#######################
+	dat <- Hourly_Model_Data..  %>% filter(Intersection_Id == 52029 & Distance_Meter <5 & Hour%in%Hours.[7:22])
+	#Stack data to was viz
+	dat  <- rbind(
+				cbind(dat %>% dplyr::select(c(Date, Hour, Traffic_Count)) %>% mutate(Count = Traffic_Count) %>% dplyr::select(-Traffic_Count),Type = "Short-Duration Count"),
+				cbind(dat %>% dplyr::select(c(Date, Hour, Signal_Count)) %>% mutate(Count = Signal_Count) %>% dplyr::select(-Signal_Count),Type = "Traffic Signal Push Button")
+			)
+```
+
+```{r fig1, fig.height = 7, fig.width =12, fig.align="center", echo = F, fig.cap="Short-Duration Counts Compared with\n Push Button Actuations\nDevice: 756\nIntersection Id: 52029"}
+  #Chart
+	 ggplot(dat) + 
+		geom_point(aes(x = Hour, y = Count, fill = Type) , size = 3.5, shape = 21, color = "black") +
+		geom_line(aes(x = Hour, y = Count, group = Type, color = Type)) +
+		facet_wrap(~Date, nrow = 1)+
+		#ggtitle(paste0("Short-Duraction Counts Compared with\n Push Button Actuations\nDevice: 756\nIntersection Id: 52029")) +
+		ylab("Hourly Count")  +  
+		xlab("Hour of Day")  +  
+		theme(text = element_text(size=20)) +
+		theme(plot.title = element_text(hjust = 0.5)) +
+	 theme(legend.position="bottom")
+
+```
+
+### Linear Model 
+For each intersection where counts and pedestrian push button actuations are available a linear-quadratic model is estimated.  The model uses the observed hourly counts as the dependent variable with the push button actuations and a squared transformation of the push button actuations are the independent variables as shown below:<br><br>
+$$\begin{aligned}PedCounts_{i}= PushButtons_{i} + PushButtons_{i}^2\end{aligned}$$
+Where *i* is the intersection where both SDC and push button data have been collected.  To assess performance of these models two measures are used including adjusted R^2^ and mean average error (MAE).  Adjusted R^2^ measures
+ the models' goodness-of-fit between the observed and estimated values with a value of 1.0 being a perfect model and 0 being poorly performing model.  MAE is another measure of model fit that averages the absolute values of the differences between estimated counts and observed counts helping to describe how big or small the estimation error is, in real terms, compared to the observed counts. 
+
+Below is a summary chart of both the adjusted R^2^ and the MAE for each of the 16 signals where counts and push button data were available concurrently. Of the 16 intersections, 13 perform well with low error and high goodness-of-fit metrics but three intersections perform poorly (766, 767,& 770) as measured by low goodness-of-fit measures.  For these intersections a model based on grouped sites will be utilized instead of an intersection specific model.  To group sites cluster analysis is performed and explained in more detail in the next section.
+
+```{r, echo = F}
+
+
+	#Chart just devices with both R^2 and MAE in same chart but different panels
+	######################
+	#Chart R-squared
+	#######################
+	dat <- RSq.. %>% filter(!Model%in%c("Negative Binomial")) %>%
+		mutate(Label = paste0(round(Adj_R2,2) ))
+	#Create facets 
+	dat <- rbind(
+		dat %>% filter(Cluster != "All") %>% mutate(Type = case_when(
+			Cluster%in%as.character(3:8) ~ "Cluster",
+			Cluster%in%unique(Model_Data..$DeviceId) ~ "Device Specific")),
+		dat %>% filter(Cluster == "All") %>% mutate(Type = "Cluster"),
+		dat %>% filter(Cluster == "All") %>% mutate(Type = "Device Specific")
+	) %>% filter(
+		Cluster%in%c(as.character(3:8),unique( Hourly_Model_Data.. $DeviceId)))
+	MAE_dat <- dat
+	#Make a copy for below
+	R2_dat  <- dat
+	
+	dat <- Diagnostic_Summary.. %>% filter(!Model%in%c("Negative Binomial")) %>%
+		mutate(Label = paste0(round(MAE,1) ))
+	#Create facets 
+	dat <- rbind(
+		dat %>% filter(Cluster != "All") %>% mutate(Type = case_when(
+			Cluster%in%as.character(3:8) ~ "Cluster",
+			Cluster%in%unique(Model_Data..$DeviceId) ~ "Device Specific")),
+		dat %>% filter(Cluster == "All") %>% mutate(Type = "Cluster"),
+		dat %>% filter(Cluster == "All") %>% mutate(Type = "Device Specific")
+	) %>% filter(
+		Cluster%in%c(as.character(3:8),unique( Hourly_Model_Data.. $DeviceId)))
+	MAE_dat <- dat
+	#COmbine
+	dat <- rbind(
+		MAE_dat %>% mutate(Value = MAE, PM = "MAE") %>% dplyr::select(c(Model, Value, Cluster, Label, Type,PM)),
+		R2_dat %>% mutate(Value = Adj_R2, PM = "R^{2}") %>% dplyr::select(c(Model, Value, Cluster, Label, Type,PM))
+	) %>%
+		filter( Model%in%c("Linear Quadratic","Linear - Quadratic"),Cluster%in%c(as.character(3:8),unique( Hourly_Model_Data.. $DeviceId)))
+	#Change Cluster 3 to more descriptice
+	dat$Cluster[dat$Cluster%in%3] <- "Clust\n3"
+	dat$Cluster[dat$Cluster%in%4] <- "Clust\n4"
+	dat$Cluster[dat$Cluster%in%5] <- "Clust\n5"
+	dat$Cluster[dat$Cluster%in%6] <- "Clust\n6"
+	dat$Cluster[dat$Cluster%in%8] <- "Clust\n8"
+	Colors. <- c("skyblue","lightgreen")
+```
+
+```{r fig2,  fig.height = 12, fig.width =12, fig.align="center", echo = F, fig.cap="Hourly Adjustment Model performance Measures by\nDevice and Cluster"}
+	ggplot(dat, aes(x = Cluster, y = Value)) + 
+		geom_bar(aes(x = Cluster, y = Value, fill = PM), position = "dodge", stat = "identity") +
+		geom_text(aes(x = Cluster, y = Value*1.025, label = Label, group = Model), position = position_dodge(width = 1)) +
+	  facet_wrap(~PM,labeller =label_parsed, nrow = 2, scales = "free") +		
+		theme(text = element_text(size=12)) +
+		scale_fill_manual(values = Colors.) + 
+		theme(plot.title = element_text(hjust = 0.5)) +
+		#ggtitle("Hourly Adjustment Model performance Measures by\nDevice and Cluster" ) +
+		ylab("")  +  
+		xlab("Device Id or Cluster") +
+		theme(legend.text=element_text(size=16),legend.title=element_text(size=16)) +
+		theme(axis.text.y=element_text(size=14),axis.title.y=element_text(size=14)) +
+		theme(axis.text.x=element_text(size=14),axis.title.x=element_text(size=14)) +
+		theme(axis.title.x=element_text(size=14)) +
+		theme(strip.text.x = element_text(size = 14)) +
+		theme(legend.position="none")
+	
+	
+	
+```
+
+### Cluster Analysis 
+There are two objectives for using cluster anlaysis.  The first objective is to group signals together with similar temporal patterns along with their SDCs so that more robust hourly adjustment models can be developed using pooled data.  The second objective of the cluster analysis is to allow for the application of the estimated hourly adjustment models where no SDCs were taken.  There are 15 intersections near our study intersections where push button data exist but no SDC was collected so in order to take advantage of these data we will use models from pooled data where the data was poole dusing cluster analysis.
+
+As can be seen in Figure 3.2 above three devices (signals) produce models with unacceptablly low R^2^ and even though the MAE is low this level of prediction power is insufficient.  The models are not performing well mostly due to very low pedestrian activity at these intersections with the three sites only seeing a few pedestrians for the entire 16 hour period of SDC collection.  To address this issue we group sites using an unsupervised machine learning algorthim called cluster analysis implemented using the kmeans function from the @stats.  Cluster analsis is a form of pattern recognition that has the ability to group data based on selected data elements, in this case the hourly proportion of total weekly unadjusted push button activity across all hours and days of the week using an annual data set.  In this cluster analysis exercise, different numbers of clusters were tried but eight was found to work best to ensure balanced cluster frequencies and also based on visual inspection, sensible groupings for different travel patter types.  In the chart below the clusters for the temporal patterns are described for five of the clusters while the three other clusters are not used becuase they were from signals that were too far and didnt conform to the placetypes required in the SDC matching criteria explained below.
+
+
+
+```{r, echo = F, include = F}
+
+  
+  dat <- Cluster_Summary.. %>% mutate(DeviceId = as.character(DeviceId)) %>% filter( Cluster%in%c(3:5,8))
+  dat$Cluster[dat$Cluster%in%3] <- "Cluster\n3"
+	dat$Cluster[dat$Cluster%in%4] <- "Cluster\n4"
+	dat$Cluster[dat$Cluster%in%5] <- "Cluster\n5"
+	dat$Cluster[dat$Cluster%in%6] <- "Cluster\n6"
+	dat$Cluster[dat$Cluster%in%8] <- "Cluster\n8"
+  dat <- dat %>% mutate(Label = case_when( Hour == "02" ~ "2\nam", Hour =="06" ~ "6\nam", Hour == "12" ~ "12\npm",  Hour == "18" ~ "6\npm",Hour == "22" ~ "10\npm", !Hour%in%Hours.[c(2,6,12,21,22)] ~ ""))
+	dat$Label[is.na(dat$Label)] <- ""
+```
+
+```{r fig3, fig.height = 12, fig.width =17, fig.align="center", warning = F, message = F,echo = F, fig.cap="Push Button Temporal Patterns Grouped Using Cluster Analysis", fig.fullwidth=TRUE}
+
+		ggplot(dat) + 
+			geom_point(aes(x = Hour, y = Prop, fill = DeviceId) , size = 3, shape = 21, color = "black") +
+			geom_line(aes(x = Hour, y = Prop, group = DeviceId, color = DeviceId)) +
+			geom_smooth(formula = y ~ x,aes(x = Hour, y = Prop,group = interaction(Weekday)), color = "black",  method = "loess") +
+			facet_wrap(Cluster~Weekday, nrow = 4)+
+			#ggtitle(paste0("Cluster Analysis for Hourly Factor for Select Clusters")) +
+			scale_x_discrete(labels = dat$Label)+
+      ylim(0,.05) +
+			ylab("Proportion of Weekly Traffic for Each Hour")  +  
+			xlab("Hours of Day and Days of Week") +
+			theme(panel.border = element_blank()) +
+			theme(text = element_text(size=20)) 
+		
+		
+```
+
+Figure 3.3 above shows 4 different temporal patterns as established from the clustering algorithm.  Cluster 3 has a pattern where the hourly peak is around the noon to 2:00 pm hours for most days though this peak is less pronounced for Monday and Sunday.  Cluster 4 exhibits a similar pattern but starts an hour later on most days until 3:00 pm and this peak period is much more pronounced than what is observed in the other clusters.  Cluster 5 shows extended mid-afternoon peaks with weekend days revealing very long shallow afternoon peaks .  Cluster 8 has lower peaks relative to the other clusters with fewer device observations that deviate subtantially from the average.  Model results from clusters 3,4, and 5 will be applied to signal locations where no SDCs were collected while models built on cluster 8 will be used to improve performance for the devices highlighted in Figure 3.2 to perform poorly as device specific models.  
+
+## Model Application 
+This section documents the application of the device specific models and the cluster analysis based models to 31 devices (or traffic signals) that are within 1000 meters of the study locations.  There are 35 signals within 1,000 meters of the 54 study locations but unfortunatley not all of those signals were included in a cluster that also had observed pedestrian traffic counts and so no cluster based model existed for them and they are removed.  The chart featured in Figure 3.4 below shows the adjusted counts after a device specific hourly adjustment model is applied as well as the raw push button actuations.  The patterns of estimated traffic exhibit expected overall patterns with less daily pedestrian  traffic in the winter months and higher traffic volumes in the summer.   This intersection is located near the Baker County Fairgrounds and Geiser Pollman Park both of which  host a number of events that result in a relatively high amount of foot traffic during the summer weekends.  The day where estimated estimated counts reached over 1,700 was a day when [multiple events](https://www.visitbaker.com/events/calendar/2022-07-01) were occuring near the intersection including [Baker City Bronc and Bull Riding event](https://www.facebook.com/TravelBakerCounty/photos/pcb.10159695497175269/10159695497045269/), [Miners Jubilee](https://www.facebook.com/photo?fbid=429722232499926&set=a.312927974179353) and multiple music acts.  There are 16 signals where push buttons and SDCs were collected concurrently and once the models estimated above are applied to each of the 16 intersections we produce 16 permanent count sites for use in the traffic factoring described below.    
+
+```{r,echo = F,include = F}
+
+
+
+	#Create a chart showing the push buttons and adjusted counts 
+	dat <- rbind(
+			Master_Apply_Data_All.. %>% filter(DeviceId == 781 & Year == "2022") %>% mutate(Count = Signal_Count, Type = "Push Button"),
+			Master_Apply_Data_All.. %>% filter(DeviceId == 781 & Year == "2022") %>% mutate(Count = Count_Est, Type = "Adjusted Count")
+		)
+  #Summarise by day  
+  dat	 <- dat %>% group_by(Date, Type) %>% summarise(Count = sum(Count))
+```
+```{r fig4, fig.height = 7, fig.width =14, fig.align="center", warning = F, message = F,echo = F, fig.cap="Push Button and Adjusted Pedestrian Count Comparison for \nDevice Id 781\nCampbell and Cedar Street", fig.fullwidth=TRUE}
+  #Plot
+	ggplot(dat) +
+		geom_point(aes(x = Date, y = Count, fill = Type) , size = 3, shape = 21, color = "black") +
+		geom_line(aes(x = Date, y = Count, group = Type, color = "DeviceId"), color = "grey") +
+		#geom_smooth(aes(x = Hour, y = Prop,group = interaction(Weekday)), color = "black", size = 1.5, method = "loess") +
+		#facet_wrap(~Weekday, nrow = 1)+
+		#ggtitle(paste0("Push Button and Adjusted Pedestrian Count Comparison for \nDevice Id 781\nCampbell and Cedar Street")) +
+		ylab("Count")  +  
+		xlab("Date") +
+		theme( panel.border = element_blank(),    panel.spacing.x = unit(0,"line")) +
+		theme(plot.title = element_text(hjust = 0.5)) +
+		theme(legend.text=element_text(size=18),legend.title=element_text(size=18)) +
+		theme(axis.text.y=element_text(size=18),axis.title.y=element_text(size=18)) +
+		theme(axis.text.x=element_text(size=18),axis.title.x=element_text(size=18)) +
+		theme(axis.title.x=element_text(size=18)) +
+    theme(plot.title = element_text(size=20))
+		
+
+```
+
+## Estimating Annual Average Pedestrian Daily Traffic (AADPT) 
+This section describes the process used to expand the short duraction counts (SDCs) using day-of-year (DOY) factors as well as how SDCs were matched with permanent count sites to estimate an AADPT. Since the SDCs were collected for only 16 hours of the day their is also a need to apply an hourly factor which are generated from the permanent count sites and applied to the SDC based on which permanent count sites were used in the DOY factoring.  
+
+### Day-of-Year (DOY) Expansion Factors
+The current state of the practice for expanding short duration pedestrian traffic counts is to use a Day-of-Year factors.  These factors are derived from a permanaent counter by dividing the daily count by the annual total thus creating a factor for each day of the year.  The DOY factor was shown by @hankey_2014, @el_esawey_toward_2016 and @nordback_2019 to minimize error compared to standard @TMG method which create 84 factors based on day of the week and month of year.  Due to the sensitivity of daily conditions like weather, traditional factors are not recommended for use in expanding pedestrian short duration traffic counts due to their inability to account for these day-to-day variations in weather.  The formula describing the DOY expansion factor method is below:<br><br> $$\begin{aligned}AADPT{i,y,j} = \frac1n\sum_{n=1}SDC{i,y,j} *\frac{1}{DOY{y,i}}\end{aligned}$$
+<br><br>
+
+Where:<br>
+*i* = intersection where SDC was collected<br>
+*y* = year of count <br>
+*j* = day SDC was collected
+
+### Matching SDCs to Permanent Count Sites
+In order to expand the SDCs to represent an annual average daily estimate of pedestrian traffic the SDC must be matched to a permanent count site.  The recommendtion from past research is to use at least three permanent (@nordback_2019) count sites to minimized annual estimation error. There are 54 locations where SDCs were collected and need to be expanded but 16 of those locations are at an intersection where push button data is being collected so the adjusted push buttons will be used directly.  For the other 38 SDC locations a combination of proximity and land use characteristics criteria will be used to guide which permanent count sites to use for expansion.  
+
+The process for matching permanent count sites with SDCs uses a selection algorithm that ensures the Place Type for each site (SDC and permanent counter) are the same and that the closest permanent count site is selected while also aiming to use three permanent count sites.  The last rule is not always acheived however as some of the SDCs are too far away from permanent counter with a maximum distance of 150,000 meters being applied.  The last exception for these algorithmic rules is if the SDC is in a place type designated 'rural' in which cases the matching element of the algorithm is relaxed to also include 'Rural Near Major City'.
+
+The entire process including the hourly adjustment modeling, application ofmodels, and factoring is described below in Figure 3.5 below.
+
+
+```{r fig5, echo=FALSE, fig.cap = "Process Work Flow",fig.align="center"}
+knitr::include_graphics("Z:/JRoll/Statewide Requests/Liquidation Costs for Pedestrians/Reports/Graphics/Process Work Flow.jpg")
+```
+
+# Final AADPT Results
+
+This section details the AADPT Results after applying the above methodologies to the SDC data.  The results are presented in three formats including a chart, a dynamic map and a table (with ability to download data).  The chart in Figure 4.1 shows the AADPT for each site and is grouped by the city in which the intersection resides.  The dynamic map allowes users to see spatially the AADPT estimates and use the tooltips (click on circles) for the intersection points to see additional information about the location.  The table below documents the final AADPT results for each intersection and include some information about the number of sites and what the place type was for both the SDC and the traffic signal (permanent counter).  
+
+## Chart Results
+
+```{r fig6, fig.height = 14, fig.width =20, fig.align="center",fig.cap="AADPT Results by Intersection Id & City", fig.fullwidth=TRUE, echo =F}
+
+  	dat <- Count_Est.. %>% mutate(Label = round(AADPT, 0)) %>% mutate(Community = factor(Community, levels = c("-",  "Adrian", "Baker City","Burns",  "Canyon City", "Dayville","Hermiston","Hines", "Huntington", 
+		"John Day", "Jordan Valley" ,"Long Creek", "Mt. Vernon", "Ontario", "Prairie City"))) %>%
+    		mutate(X = "", Intersection_Id = as.character(Intersection_Id))
+    	#Fix communit name of one locaiton
+    	dat$Community[dat$Intersection_Id%in%110034] <- "Ontario"
+    	#Replace spaces with carriage return 
+    	dat$Community <- gsub(" ","\n",dat$Community)
+    	#Create color pallet
+    	Colors. <- c(brewer.pal(n = 11, name ="Spectral"),"skyblue","darkblue","lightgreen")
+	
+	
+  ggplot(dat) + 
+		geom_bar(aes(x = Intersection_Id, y = AADPT, fill = Community), position = "dodge", stat = "identity") +
+		#geom_col(aes(x = Intersection_Id, y = AADPT, fill = Community), position = "dodge",width = 0.9) +
+		geom_text(aes(x = Intersection_Id, y = AADPT + 2, label = Label), position = position_dodge(width = 1)) +
+		facet_grid(rows = vars(Community),scales = "free_y", space = "free_y") +
+		coord_flip() +
+		scale_fill_manual(values = Colors.) + 
+		theme(plot.title = element_text(hjust = 0.5)) +
+		ggtitle("" ) +
+		ylab("Annual Average Daily Pedestrian Traffic Count")  +  
+		xlab("Intersection Id") +
+		#theme(legend.text=element_text(size=),legend.title=element_text(size=16)) +
+		theme(axis.text.y=element_text(size=14),axis.title.y=element_text(size=20)) +
+		theme(axis.text.x=element_text(size=14),axis.title.x=element_text(size=20)) +
+		theme(axis.title.x=element_text(size=20)) +
+		theme(strip.text.x = element_text(size = 16)) +
+		theme(plot.title = element_text(size = 20))+ 
+		theme(legend.position="none")
+		
+
+```
+<br><br>
+
+
+## Map Results
+This map is dynamic and can be explored.  For more infomration about the intersection use the mouse to click on the interseciton points to reveal more information through the tooltips.  
+
+```{r, echo = F,warning=FALSE,message=FALSE, include = FALSE}
+  #Map 2022 Pedestrian Traffic Estimates	
+	#####################
+	#Download census places
+	Places_Sf <- places(state = "Oregon", year ="2020")
+
+	#Select intersecitons
+	int <- Select_Int_Sf %>% left_join(., Count_Est..[,c("Intersection_Id","Device_Count","AADPT")] %>% mutate(Intersection_Id = as.character(Intersection_Id)), by = "Intersection_Id")
+	#Create categorical values
+	int$AADPT_Cat <- cut(int$AADPT, breaks = c(0,25,50,75,100,150,250), labels = c("1-25","26-50","51-75","76-100", "101-150","151-250"))
+	#Select place geos with an interseciton study 
+	Select_Places_Sf <- st_join(Places_Sf, int) %>% filter(!is.na(Intersection_Id) & !duplicated(NAME))
+	
+	#Define palette
+	#AADPT----
+	Colors.  <- colorRampPalette(colors = c("red", "blue"), space = "Lab")(6)
+	#mypal <- colorNumeric(palette = Colors., domain = int$AADPT)
+	mypal <- colorFactor(palette = rev(Colors.), domain = int$AADPT_Cat)
+	#Places
+	placepal <- colorFactor(brewer.pal(n = 11, name ="Spectral") , Select_Places_Sf$NAME) 
+	
+	
+	#Map
+	Map <- leaflet(int) %>% addTiles() %>%
+		#Add census places geos
+		addPolygons(data = Select_Places_Sf,  weight = 1,stroke = TRUE, fillOpacity = 0.5, smoothFactor = 0.5,
+			color = "black", opacity = 1,
+			fillColor = ~placepal(Select_Places_Sf$NAME)) %>%
+			#Add counts
+		addCircles(data=int, color = ~mypal(AADPT_Cat), radius = 25,
+				popup = paste(
+				"<strong>Intersection Id: </strong>", int$Intersection_Id,"<br>",
+				"<strong>Pedestrian AADPT: </strong>", int$AADPT,"<br>",
+				"<strong>Pedestrian AADPT Category: </strong>", int$AADPT_Cat,"<br>",
+				"<strong>City: </strong>", int$Community,"<br>",
+				"<strong>Place Type </strong>", int$PlaceType)) %>%
+	addLegendFactor(position = "topright",  pal = mypal, values = int$AADPT_Cat, title = "Estimated AADPT", width = 60,  height = 40, shape = "circle")	%>%
+	addLegend("bottomright",  pal = placepal, values = ~ Select_Places_Sf$NAME,title = "Places",    opacity = 1)	
+	
+	
+```
+
+```{r fig8,  fig.height = 7, fig.width =14, fig.align="left",echo = F}
+  Map
+```
+
+<br><br>
+
+## Table Results
+The table below is dynamic as well and can be searched using the search bar and any data of interest can be exported in a couple different formats using the table buttons.  
+
+
+```{r, echo = FALSE}
+
+  #Prepare results table
+  Table.. <- Count_Est.. %>% mutate(City = Community, AADPT = round(AADPT,0), Annual_Traffic_Est = round(Annual_Traffic_Est,0))
+  #Table.. <- Table..[,c("Intersection_Id","Annual_Traffic_Est","AADPT","City","Device_Count","DeviceId","Place_Type_SDC","Place_Type_Signal")]
+  Table.. %>%DT::datatable(extensions = 'Buttons',
+            options = list(dom = 'Blfrtip',
+                           buttons = c('copy', 'csv', 'excel', 'pdf', 'print'),
+                           lengthMenu = list(c(10,25,50,-1),
+                                             c(10,25,50,"All"))))
+
+
+```
+
+# References
+
+
